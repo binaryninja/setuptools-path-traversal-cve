@@ -1,0 +1,21 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install openssh-client for SSH key generation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install setuptools for the vendored jaraco module
+RUN pip install --no-cache-dir setuptools==78.1.0
+
+COPY tarball_server.py .
+
+ENV PORT=8080
+ENV DEMO_PREFIX=/tmp/demo
+ENV SCENARIO=cron
+
+EXPOSE 8080
+
+CMD ["python", "tarball_server.py"]

