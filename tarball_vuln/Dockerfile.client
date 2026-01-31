@@ -2,13 +2,22 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Install vulnerable setuptools version and openssh-server for SSH validation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssh-server \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd \
+    && echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+
 # Install setuptools with the vulnerable jaraco.context module
 RUN pip install --no-cache-dir setuptools==78.1.0
 
 COPY tarball_client.py .
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
 
 ENV SERVER_HOST=server
 ENV SERVER_PORT=8080
-ENV DEMO_PREFIX=/tmp/demo
 
-CMD ["python", "tarball_client.py"]
+CMD ["./entrypoint.sh"]

