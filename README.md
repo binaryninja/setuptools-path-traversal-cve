@@ -1,4 +1,69 @@
-# Setuptools Path Traversal Vulnerability
+# Setuptools Path Traversal Vulnerabilities
+
+This repository documents **two distinct path traversal vulnerabilities** in setuptools 78.1.0:
+
+| Vulnerability | Component | Attack Vector | Impact |
+|--------------|-----------|---------------|--------|
+| [URL Path Injection](#vulnerability-1-url-path-injection) | `package_index.py` | Malicious package index | Arbitrary file write with attacker content |
+| [Namespace Package Traversal](#vulnerability-2-namespace-package-traversal) | `wheel.py` | Malicious wheel file | Directory + file creation outside install dir |
+
+---
+
+## Vulnerability 2: Namespace Package Traversal
+
+**NEW: Arbitrary file write via malicious `namespace_packages.txt` in wheel files**
+
+| Field | Value |
+|-------|-------|
+| **Component** | `setuptools/wheel.py:224-236` |
+| **Function** | `Wheel._fix_namespace_packages()` |
+| **Type** | Path Traversal (CWE-22) |
+| **Impact** | Arbitrary directory/file creation |
+
+### Quick Demo
+
+```bash
+cd namespace_packages_vuln/
+rm -rf /tmp/pwned_by_namespace_traversal
+python3 exploit_test.py
+ls -la /tmp/pwned_by_namespace_traversal/
+```
+
+### The Bug
+
+```python
+def _fix_namespace_packages(egg_info, destination_eggdir):
+    namespace_packages = _read_utf8_with_fallback(...).split()
+    for mod in namespace_packages:
+        # mod = "/tmp/pwned" from malicious wheel
+        mod_dir = os.path.join(destination_eggdir, *mod.split('.'))
+        # Result: /tmp/pwned (absolute path escapes destination!)
+        os.mkdir(mod_dir)  # Creates /tmp/pwned/
+        with open(os.path.join(mod_dir, '__init__.py'), 'w') as fp:
+            fp.write(NAMESPACE_PACKAGE_INIT)  # Writes file outside install dir
+```
+
+### Attack Flow
+
+```
+namespace_packages.txt contains: /tmp/pwned
+                                     │
+                                     ▼
+mod.split('.') = ['/tmp/pwned']
+                                     │
+                                     ▼
+os.path.join(dest, '/tmp/pwned') = '/tmp/pwned'  ← absolute path wins!
+                                     │
+                                     ▼
+os.mkdir('/tmp/pwned')  ← directory created outside dest
+open('/tmp/pwned/__init__.py', 'w')  ← file written outside dest
+```
+
+See [namespace_packages_vuln/RESEARCH.md](namespace_packages_vuln/RESEARCH.md) for full technical analysis.
+
+---
+
+## Vulnerability 1: URL Path Injection
 
 **Arbitrary file write via absolute path injection in `package_index.py`**
 
@@ -121,6 +186,11 @@ Impact:  Code execution on every new shell
 ├── client/
 │   ├── Dockerfile              # Victim with vulnerable setuptools
 │   └── victim_client.py        # Demonstrates exploitation
+├── namespace_packages_vuln/    # NEW: wheel.py namespace traversal
+│   ├── RESEARCH.md             # Technical deep dive
+│   ├── build_malicious_wheel.py    # Creates malicious wheel
+│   ├── exploit_test.py         # Triggers vulnerability
+│   └── malicious-1.0-py3-none-any.whl  # Pre-built PoC wheel
 ├── Dockerfile                  # Standalone single-container demo
 ├── demo_scenarios.py           # All three scenarios in one script
 ├── poc_direct_download.py      # Simplest PoC
@@ -128,7 +198,7 @@ Impact:  Code execution on every new shell
 ├── poc_realistic_attack.py     # Simulated attack
 ├── poc_full_easy_install.py    # Full attack chain
 ├── test_path_traversal_security.py  # 45 security tests
-├── RESEARCH.md                 # Deep technical analysis
+├── RESEARCH.md                 # Deep technical analysis (package_index.py)
 └── README.md
 ```
 
@@ -233,7 +303,8 @@ This is a **different vulnerability** from the March 2024 command injection repo
 
 ## References
 
-- [RESEARCH.md](RESEARCH.md) - Full technical deep dive
+- [RESEARCH.md](RESEARCH.md) - Full technical deep dive (package_index.py)
+- [namespace_packages_vuln/RESEARCH.md](namespace_packages_vuln/RESEARCH.md) - Technical analysis (wheel.py)
 - [CWE-22: Path Traversal](https://cwe.mitre.org/data/definitions/22.html)
 - [Python os.path.join docs](https://docs.python.org/3/library/os.path.html#os.path.join)
 - [setuptools GitHub](https://github.com/pypa/setuptools)
